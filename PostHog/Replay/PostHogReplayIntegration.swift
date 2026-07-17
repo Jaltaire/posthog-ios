@@ -701,7 +701,8 @@
             windowSize: CGSize,
             screenName: String?,
             postHog: PostHogSDK,
-            timestampDate: Date
+            timestampDate: Date,
+            completion: (() -> Void)? = nil
         ) {
             var hasChanges = false
             let timestamp = timestampDate.toMillis()
@@ -737,6 +738,11 @@
             // TODO: IncrementalSnapshot, type=2
 
             PostHogReplayIntegration.dispatchQueue.async {
+                // The completion must fire on every exit path, otherwise the
+                // screenshot in-flight gate would never be released and capture
+                // would stop for the rest of the session
+                defer { completion?() }
+
                 // always make sure we have a fresh session id at correct timestamp
                 guard let sessionId = postHog.sessionManager.getSessionId(at: timestampDate) else {
                     return
@@ -1071,8 +1077,13 @@
                         windowSize: windowSize,
                         screenName: screenName,
                         postHog: postHog,
-                        timestampDate: timestampDate
+                        timestampDate: timestampDate,
+                        completion: { [weak self] in
+                            self?.finishScreenshotRender()
+                        }
                     )
+                } else {
+                    finishScreenshotRender()
                 }
             }
         }
@@ -1082,8 +1093,16 @@
             screenName: String?,
             postHog: PostHogSDK
         ) {
-            defer { finishScreenshotRender() }
-
+            // The in-flight gate is intentionally NOT released when this
+            // function returns. Serialization of the captured image happens
+            // asynchronously on the replay dispatch queue, and on slow devices
+            // image encoding can take longer than the capture throttle. If the
+            // gate were released before serialization completed, captures would
+            // outpace encoding and every queued closure would retain a
+            // full-screen UIImage, growing memory without bound until the OS
+            // kills the app. The gate is instead released when serialization
+            // finishes (or on any earlier bail-out path below), so at most one
+            // screenshot is ever being captured or encoded at a time.
             let screenshotCapture: (wireframe: RRWireframe, windowSize: CGSize, timestampDate: Date)?
             if Thread.isMainThread {
                 screenshotCapture = collectScreenshotMetadata(window)
@@ -1092,6 +1111,7 @@
             }
 
             guard let screenshotCapture, postHog.isSessionReplayActive() else {
+                finishScreenshotRender()
                 return
             }
 
