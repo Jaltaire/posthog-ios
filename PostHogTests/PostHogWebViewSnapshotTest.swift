@@ -455,13 +455,41 @@
             #expect(delays == [PostHogWebViewSnapshot.timeout])
         }
 
-        @Test("WebKit reports on a web view that has no page to draw", .timeLimit(.minutes(1)))
-        func webKitSnapshotCompletes() async {
-            let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
-            let image: UIImage? = await withCheckedContinuation { continuation in
-                PostHogWebViewSnapshotter.webKitSnapshot(webView) { continuation.resume(returning: $0) }
+        final class RepliedWebView: WKWebView {
+            var configurations: [WKSnapshotConfiguration?] = []
+            var reply: (UIImage?, Error?) = (nil, nil)
+
+            override func takeSnapshot(
+                with snapshotConfiguration: WKSnapshotConfiguration?,
+                completionHandler: @escaping @MainActor (UIImage?, Error?) -> Void
+            ) {
+                configurations.append(snapshotConfiguration)
+                completionHandler(reply.0, reply.1)
             }
-            #expect(image == nil)
+        }
+
+        @Test("asks WebKit for a snapshot taken after the web view's next update, and hands over its image")
+        func webKitSnapshotImage() {
+            let webView = RepliedWebView()
+            let image = makeImage()
+            webView.reply = (image, nil)
+            var delivered: [UIImage?] = []
+            PostHogWebViewSnapshotter.webKitSnapshot(webView) { delivered.append($0) }
+            #expect(webView.configurations.count == 1)
+            #expect(webView.configurations.first??.afterScreenUpdates == true)
+            #expect(webView.configurations.first??.rect.isNull == true)
+            #expect(delivered.count == 1)
+            #expect(delivered.first.flatMap { $0 } === image)
+        }
+
+        @Test("hands over no image when WebKit reports an error")
+        func webKitSnapshotError() {
+            let webView = RepliedWebView()
+            webView.reply = (nil, NSError(domain: WKErrorDomain, code: WKError.unknown.rawValue))
+            var delivered: [UIImage?] = []
+            PostHogWebViewSnapshotter.webKitSnapshot(webView) { delivered.append($0) }
+            #expect(delivered.count == 1)
+            #expect(delivered.first.flatMap { $0 } == nil)
         }
     }
 
