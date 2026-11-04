@@ -54,6 +54,7 @@
 
         private let screenshotRenderLock = NSLock()
         private var isScreenshotRenderInFlight = false
+        var webViewSnapshotter = PostHogWebViewSnapshotter()
 
         private let eventTriggersLock = NSLock()
         private var eventTriggers: [String]?
@@ -1298,13 +1299,41 @@
             preferFidelityRenderer: Bool = true,
             overrideMaskRects: [CGRect]? = nil
         ) -> Bool {
-            defer { finishScreenshotRender() }
+            var awaitsWebViewSnapshot = false
+            defer {
+                if !awaitsWebViewSnapshot {
+                    finishScreenshotRender()
+                }
+            }
 
             // Ahead of the render, not just after it: collect() now renders the image, so a session
             // that stopped between the snapshot trigger and here would otherwise pay for a
             // full-window render and throw it away.
             guard postHog.isSessionReplayActive() else {
                 return false
+            }
+
+            if !episodeFirstFrame, case let .webView(webView) = PostHogWebViewSnapshot.source(
+                for: window,
+                webViewSnapshots: postHog.config.sessionReplayConfig.screenshotModeWebViewSnapshot,
+                onMainThread: Thread.isMainThread
+            ) {
+                guard let screenshotCapture = collectScreenshotMetadata(
+                    window,
+                    overrideMaskRects: overrideMaskRects,
+                    renderImage: false
+                ) else {
+                    return false
+                }
+                awaitsWebViewSnapshot = true
+                snapshotAndEnqueueWebView(
+                    webView,
+                    screenshotCapture,
+                    window: window,
+                    screenName: screenName,
+                    postHog: postHog
+                )
+                return true
             }
 
             // The bridge's first frame needs its own `afterScreenUpdates: true` pass, so it renders
@@ -1334,6 +1363,39 @@
                 timestampDate: screenshotCapture.timestampDate,
                 image: screenshotCapture.image,
                 episodeFirstFrame: episodeFirstFrame
+            )
+        }
+
+        private func snapshotAndEnqueueWebView(
+            _ webView: WKWebView,
+            _ screenshotCapture: ScreenshotCapture,
+            window: UIWindow,
+            screenName: String?,
+            postHog: PostHogSDK
+        ) {
+            webViewSnapshotter.capture(
+                webView,
+                onImage: { [weak self, weak window] image in
+                    guard let self else {
+                        return
+                    }
+                    defer { self.finishScreenshotRender() }
+                    guard let window, postHog.isSessionReplayActive() else {
+                        return
+                    }
+                    screenshotCapture.wireframe.image = image
+                    self.captureSnapshot(
+                        screenshotCapture.wireframe,
+                        window: window,
+                        windowSize: screenshotCapture.windowSize,
+                        screenName: screenName,
+                        postHog: postHog,
+                        timestampDate: Date()
+                    )
+                },
+                onFailure: { [weak self] in
+                    self?.finishScreenshotRender()
+                }
             )
         }
 

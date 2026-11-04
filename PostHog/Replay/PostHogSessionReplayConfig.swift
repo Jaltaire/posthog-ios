@@ -60,6 +60,20 @@
         /// Default: false
         @objc public var screenshotModeBackgroundCapture: Bool = false
 
+        /// Capture a window that shows nothing but one web view with WebKit's own snapshot of that web view,
+        /// when `screenshotMode` is enabled.
+        ///
+        /// Drawing a window's view hierarchy holds the main thread while the render server draws the window again
+        /// and UIKit copies the result into a bitmap. WebKit instead has the render server draw the web view straight
+        /// into an image after the web view's next presentation update, and the image is read while it is encoded,
+        /// off the main thread. A window that shows any other view in front of the web view, such as an alert or a
+        /// native overlay, is drawn as before, and masks apply to the snapshot as they do to a drawn window.
+        /// Has no effect when `screenshotModeBackgroundCapture` is enabled.
+        ///
+        /// Experimental.
+        /// Default: false
+        @objc public var screenshotModeWebViewSnapshot: Bool = false
+
         /// Resolution of `screenshotMode` screenshots, as a multiplier of the screen's native resolution.
         ///
         /// - `nil`: one pixel per point on every device, so a 402×874 pt screen uploads 402×874 pixels.
