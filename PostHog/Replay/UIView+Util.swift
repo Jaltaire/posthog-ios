@@ -55,8 +55,10 @@
 
             // Use native screen scale for best drawHierarchy performance.
             // Using a non-native scale can trigger internal rescaling overhead.
-            let nativeScale = (self as? UIWindow ?? window)?.screen.scale ?? 1
-            let renderer = PostHogGraphicsImageRenderer(size: size, scale: nativeScale)
+            let screen = (self as? UIWindow ?? window)?.screen
+            let nativeScale = screen?.scale ?? 1
+            let colorSpace = PostHogGraphicsImageRenderer.colorSpace(for: screen?.traitCollection.displayGamut ?? .unspecified)
+            let renderer = PostHogGraphicsImageRenderer(size: size, scale: nativeScale, colorSpace: colorSpace)
 
             return autoreleasepool {
                 renderer.image { _ in

@@ -9,6 +9,8 @@
     /// Cached device RGB color space — avoids creating a new one per render call.
     private let deviceRGBColorSpace = CGColorSpaceCreateDeviceRGB()
 
+    private let displayP3ColorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+
     /// High-performance image renderer that bypasses `UIGraphicsImageRenderer` overhead.
     ///
     /// This directly allocates a `CGContext` for the target image and pushes it as the
@@ -17,10 +19,23 @@
     final class PostHogGraphicsImageRenderer {
         private let size: CGSize
         private let scale: CGFloat
+        private let colorSpace: CGColorSpace
 
-        init(size: CGSize, scale: CGFloat) {
+        init(size: CGSize, scale: CGFloat, colorSpace: CGColorSpace = deviceRGBColorSpace) {
             self.size = size
             self.scale = scale
+            self.colorSpace = colorSpace
+        }
+
+        static func colorSpace(for gamut: UIDisplayGamut) -> CGColorSpace {
+            switch gamut {
+            case .P3:
+                return displayP3ColorSpace
+            case .SRGB, .unspecified:
+                return deviceRGBColorSpace
+            @unknown default:
+                return deviceRGBColorSpace
+            }
         }
 
         func image(actions: (CGContext) -> Void) -> UIImage? {
@@ -46,7 +61,7 @@
                 height: pixelsPerColumn,
                 bitsPerComponent: bitsPerComponent,
                 bytesPerRow: bytesPerRow,
-                space: deviceRGBColorSpace,
+                space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
             ) else {
                 return nil
