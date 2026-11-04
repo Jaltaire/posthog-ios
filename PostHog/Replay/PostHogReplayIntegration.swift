@@ -42,7 +42,7 @@
 
         private let screenshotRenderLock = NSLock()
         private var isScreenshotRenderInFlight = false
-        private let webViewSnapshotter = PostHogWebViewSnapshotter()
+        private let webViewSnapshotter = PostHogWebViewSnapshotter<WKWebView>()
         private let captureTimer = PostHogReplayCaptureTimer()
 
         private let eventTriggersLock = NSLock()
@@ -1075,7 +1075,14 @@
             timestampDate: Date
         ) {
             autoreleasepool {
-                if let image = window.toImage(), image.size.hasSize() {
+                let image = PostHogWebViewSnapshot.screenshot(
+                    of: window,
+                    webViewSnapshots: postHog.config.sessionReplayConfig.screenshotModeWebViewSnapshot,
+                    onMainThread: Thread.isMainThread,
+                    snapshotter: webViewSnapshotter,
+                    draw: { $0.toImage() }
+                )
+                if let image, image.size.hasSize() {
                     wireframe.image = image
                     captureSnapshot(
                         wireframe,
@@ -1121,67 +1128,13 @@
                 return
             }
 
-            let source = PostHogWebViewSnapshot.source(
-                for: window,
-                webViewSnapshots: postHog.config.sessionReplayConfig.screenshotModeWebViewSnapshot,
-                onMainThread: Thread.isMainThread
-            )
-            switch source {
-            case let .webView(webView):
-                snapshotAndEnqueueWebView(
-                    webView,
-                    wireframe: screenshotCapture.wireframe,
-                    window: window,
-                    windowSize: screenshotCapture.windowSize,
-                    screenName: screenName,
-                    postHog: postHog
-                )
-            case .windowHierarchy:
-                renderAndEnqueueScreenshot(
-                    screenshotCapture.wireframe,
-                    window: window,
-                    windowSize: screenshotCapture.windowSize,
-                    screenName: screenName,
-                    postHog: postHog,
-                    timestampDate: screenshotCapture.timestampDate
-                )
-            }
-        }
-
-        private func snapshotAndEnqueueWebView(
-            _ webView: WKWebView,
-            wireframe: RRWireframe,
-            window: UIWindow,
-            windowSize: CGSize,
-            screenName: String?,
-            postHog: PostHogSDK
-        ) {
-            webViewSnapshotter.capture(
-                webView,
-                onImage: { [weak self, weak window] image in
-                    guard let self else {
-                        return
-                    }
-                    guard let window, postHog.isSessionReplayActive() else {
-                        self.finishScreenshotRender()
-                        return
-                    }
-                    wireframe.image = image
-                    self.captureSnapshot(
-                        wireframe,
-                        window: window,
-                        windowSize: windowSize,
-                        screenName: screenName,
-                        postHog: postHog,
-                        timestampDate: Date(),
-                        completion: { [weak self] in
-                            self?.finishScreenshotRender()
-                        }
-                    )
-                },
-                onFailure: { [weak self] in
-                    self?.finishScreenshotRender()
-                }
+            renderAndEnqueueScreenshot(
+                screenshotCapture.wireframe,
+                window: window,
+                windowSize: screenshotCapture.windowSize,
+                screenName: screenName,
+                postHog: postHog,
+                timestampDate: screenshotCapture.timestampDate
             )
         }
 
