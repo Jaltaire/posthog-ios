@@ -85,6 +85,17 @@
         /// Note: Previously `debouncerDelay`
         @objc public var throttleDelay: TimeInterval = 1
 
+        /// Capture a snapshot on this fixed interval, in seconds, as well as when views are laid out.
+        ///
+        /// Snapshots are otherwise taken only on UIKit layout passes, at most once per `throttleDelay`, so content
+        /// that changes without laying out a view, such as a web page, a video, or a Metal view, records nothing until
+        /// something else is laid out. Captures on the interval are taken on the main queue, in every run loop mode,
+        /// and each one is skipped while the previous capture is still being taken or encoded.
+        /// A value of zero or less captures on layout passes alone.
+        ///
+        /// Default: 0
+        @objc public var captureInterval: TimeInterval = 0
+
         /// Enable capturing console output for session replay.
         ///
         /// When enabled, logs from the following sources will be captured:

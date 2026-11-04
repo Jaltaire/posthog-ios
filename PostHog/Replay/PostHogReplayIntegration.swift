@@ -43,6 +43,7 @@
         private let screenshotRenderLock = NSLock()
         private var isScreenshotRenderInFlight = false
         private let webViewSnapshotter = PostHogWebViewSnapshotter()
+        private let captureTimer = PostHogReplayCaptureTimer()
 
         private let eventTriggersLock = NSLock()
         private var eventTriggers: [String]?
@@ -269,6 +270,9 @@
                     // called on main thread
                     self?.snapshot()
                 }
+                captureTimer.begin(every: postHog.config.sessionReplayConfig.captureInterval) { [weak self] in
+                    self?.snapshot()
+                }
             }
 
             // start listening to `UIApplication.sendEvent`
@@ -327,6 +331,7 @@
             applicationForegroundedToken = nil
             // stop listening to `UIView.layoutSubviews` events
             viewLayoutToken = nil
+            captureTimer.end()
             // stop plugins
             let pluginsToStop = installedPluginsLock.withLock {
                 defer { installedPlugins = [] }
@@ -1616,6 +1621,10 @@
         extension PostHogReplayIntegration {
             static func clearInstalls() {
                 integrationInstallState.clear()
+            }
+
+            var isCapturingOnInterval: Bool {
+                captureTimer.isRunning
             }
         }
     #endif
