@@ -55,6 +55,18 @@
         /// Default: false
         @objc public var screenshotModeBackgroundCapture: Bool = false
 
+        /// Capture a window that shows nothing but one web view with WebKit's own snapshot of that web view,
+        /// when `screenshotMode` is enabled.
+        ///
+        /// Drawing a window's view hierarchy holds the main thread while the screen is rendered again and copied
+        /// into a bitmap. WebKit instead has the render server draw the web view straight into an image, after the
+        /// web view's next presentation update, so the main thread waits only for that render, at the start of a
+        /// frame. A window that shows any other view, such as an alert or a native overlay, is drawn as before.
+        /// Has no effect when `screenshotModeBackgroundCapture` is enabled.
+        ///
+        /// Default: false
+        @objc public var screenshotModeWebViewSnapshot: Bool = false
+
         /// Debouncer delay used to reduce the number of snapshots captured and reduce performance impact
         /// This is used for capturing the view as a wireframe or screenshot
         /// The lower the number more snapshots will be captured but higher the performance impact
