@@ -64,9 +64,11 @@
         /// when `screenshotMode` is enabled.
         ///
         /// Drawing a window's view hierarchy holds the main thread while the render server draws the window again
-        /// and UIKit copies the result into a bitmap. WebKit instead has the render server draw the web view straight
-        /// into an image after the web view's next presentation update, and the image is read while it is encoded,
-        /// off the main thread. A window that shows any other view in front of the web view, such as an alert or a
+        /// and UIKit copies the result into a bitmap. WebKit instead has the render server draw what it shows of the
+        /// web view straight into an image during the capture, without waiting for the web view's next update, and the
+        /// image is read while it is encoded, off the main thread. When WebKit cannot answer during the capture, as
+        /// while the web view is being resized, the window is drawn instead, and the web view is not asked again until
+        /// WebKit has answered. A window that shows any other view in front of the web view, such as an alert or a
         /// native overlay, is drawn as before, and masks apply to the snapshot as they do to a drawn window.
         /// Has no effect when `screenshotModeBackgroundCapture` is enabled.
         ///

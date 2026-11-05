@@ -54,7 +54,7 @@
 
         private let screenshotRenderLock = NSLock()
         private var isScreenshotRenderInFlight = false
-        var webViewSnapshotter = PostHogWebViewSnapshotter()
+        var webViewSnapshotter = PostHogWebViewSnapshotter<WKWebView>()
 
         private let eventTriggersLock = NSLock()
         private var eventTriggers: [String]?
@@ -1238,7 +1238,8 @@
             _ window: UIWindow,
             preferFidelityRenderer: Bool = true,
             overrideMaskRects: [CGRect]? = nil,
-            renderImage: Bool = true
+            renderImage: Bool = true,
+            webViewSnapshots: Bool = false
         ) -> ScreenshotCapture? {
             guard let wireframe = autoreleasepool(invoking: { prepareScreenshotWireframe(window, overrideMaskRects: overrideMaskRects) }) else {
                 return nil
@@ -1247,7 +1248,13 @@
             // The settled path renders here so the pixels come from the same main-thread tick that
             // measured the mask rects — any later and the presentation tree has moved on. Callers
             // that render themselves (background capture, the bridge's first frame) pass false.
-            let image = renderImage ? window.toImage(preferFidelityRenderer: preferFidelityRenderer) : nil
+            let image = renderImage ? PostHogWebViewSnapshot.screenshot(
+                of: window,
+                webViewSnapshots: webViewSnapshots,
+                onMainThread: Thread.isMainThread,
+                snapshotter: webViewSnapshotter,
+                draw: { $0.toImage(preferFidelityRenderer: preferFidelityRenderer) }
+            ) : nil
             // A render that was attempted and failed skips the tick; only a deferred render falls
             // through to renderAndEnqueueScreenshot's own draw.
             if renderImage, image == nil {
@@ -1299,41 +1306,13 @@
             preferFidelityRenderer: Bool = true,
             overrideMaskRects: [CGRect]? = nil
         ) -> Bool {
-            var awaitsWebViewSnapshot = false
-            defer {
-                if !awaitsWebViewSnapshot {
-                    finishScreenshotRender()
-                }
-            }
+            defer { finishScreenshotRender() }
 
             // Ahead of the render, not just after it: collect() now renders the image, so a session
             // that stopped between the snapshot trigger and here would otherwise pay for a
             // full-window render and throw it away.
             guard postHog.isSessionReplayActive() else {
                 return false
-            }
-
-            if !episodeFirstFrame, case let .webView(webView) = PostHogWebViewSnapshot.source(
-                for: window,
-                webViewSnapshots: postHog.config.sessionReplayConfig.screenshotModeWebViewSnapshot,
-                onMainThread: Thread.isMainThread
-            ) {
-                guard let screenshotCapture = collectScreenshotMetadata(
-                    window,
-                    overrideMaskRects: overrideMaskRects,
-                    renderImage: false
-                ) else {
-                    return false
-                }
-                awaitsWebViewSnapshot = true
-                snapshotAndEnqueueWebView(
-                    webView,
-                    screenshotCapture,
-                    window: window,
-                    screenName: screenName,
-                    postHog: postHog
-                )
-                return true
             }
 
             // The bridge's first frame needs its own `afterScreenUpdates: true` pass, so it renders
@@ -1345,7 +1324,8 @@
                     window,
                     preferFidelityRenderer: preferFidelityRenderer,
                     overrideMaskRects: overrideMaskRects,
-                    renderImage: rendersInMeasuringTick
+                    renderImage: rendersInMeasuringTick,
+                    webViewSnapshots: postHog.config.sessionReplayConfig.screenshotModeWebViewSnapshot
                 )
             }
             let screenshotCapture = Thread.isMainThread ? collect() : DispatchQueue.main.sync(execute: collect)
@@ -1363,39 +1343,6 @@
                 timestampDate: screenshotCapture.timestampDate,
                 image: screenshotCapture.image,
                 episodeFirstFrame: episodeFirstFrame
-            )
-        }
-
-        private func snapshotAndEnqueueWebView(
-            _ webView: WKWebView,
-            _ screenshotCapture: ScreenshotCapture,
-            window: UIWindow,
-            screenName: String?,
-            postHog: PostHogSDK
-        ) {
-            webViewSnapshotter.capture(
-                webView,
-                onImage: { [weak self, weak window] image in
-                    guard let self else {
-                        return
-                    }
-                    defer { self.finishScreenshotRender() }
-                    guard let window, postHog.isSessionReplayActive() else {
-                        return
-                    }
-                    screenshotCapture.wireframe.image = image
-                    self.captureSnapshot(
-                        screenshotCapture.wireframe,
-                        window: window,
-                        windowSize: screenshotCapture.windowSize,
-                        screenName: screenName,
-                        postHog: postHog,
-                        timestampDate: Date()
-                    )
-                },
-                onFailure: { [weak self] in
-                    self?.finishScreenshotRender()
-                }
             )
         }
 

@@ -335,124 +335,185 @@
         }
     }
 
+    enum SnapshotReply {
+        case during(UIImage?)
+        case later
+    }
+
+    final class SnapshotRecorder<Target: AnyObject> {
+        var reply: SnapshotReply = .later
+        var requests: [ObjectIdentifier] = []
+        var completions: [(UIImage?) -> Void] = []
+
+        func snapshotter() -> PostHogWebViewSnapshotter<Target> {
+            PostHogWebViewSnapshotter { target, completion in
+                self.requests.append(ObjectIdentifier(target))
+                switch self.reply {
+                case let .during(image):
+                    completion(image)
+                case .later:
+                    self.completions.append(completion)
+                }
+            }
+        }
+    }
+
+    func makeSnapshotImage(_ color: UIColor = .red) -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
+            color.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+    }
+
     @Suite("Web view snapshotter")
     @MainActor
     struct PostHogWebViewSnapshotterTests {
-        final class Recorder {
-            var requested: [WKWebView] = []
-            var completions: [(UIImage?) -> Void] = []
-            var delays: [TimeInterval] = []
-            var scheduled: [() -> Void] = []
-            var images: [UIImage] = []
-            var failures = 0
-
-            func snapshotter(timeout: TimeInterval = 5) -> PostHogWebViewSnapshotter {
-                PostHogWebViewSnapshotter(
-                    snapshot: { webView, completion in
-                        self.requested.append(webView)
-                        self.completions.append(completion)
-                    },
-                    schedule: { delay, work in
-                        self.delays.append(delay)
-                        self.scheduled.append(work)
-                    },
-                    timeout: timeout
-                )
-            }
-
-            func capture(_ snapshotter: PostHogWebViewSnapshotter, _ webView: WKWebView) {
-                snapshotter.capture(
-                    webView,
-                    onImage: { self.images.append($0) },
-                    onFailure: { self.failures += 1 }
-                )
-            }
-        }
-
-        func makeImage() -> UIImage {
-            UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
-                UIColor.red.setFill()
-                context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
-            }
-        }
-
-        @Test("asks WebKit for the given web view and arms the timeout")
-        func requestsSnapshotAndArmsTimeout() {
-            let recorder = Recorder()
-            let webView = WKWebView()
-            recorder.capture(recorder.snapshotter(timeout: 3), webView)
-            #expect(recorder.requested.count == 1)
-            #expect(recorder.requested.first === webView)
-            #expect(recorder.delays == [3])
-            #expect(recorder.images.isEmpty)
-            #expect(recorder.failures == 0)
-        }
-
-        @Test("hands over an image that arrives in time, once")
-        func imageBeforeTimeout() {
-            let recorder = Recorder()
-            recorder.capture(recorder.snapshotter(), WKWebView())
-            let image = makeImage()
-            recorder.completions[0](image)
-            recorder.scheduled[0]()
-            #expect(recorder.images.count == 1)
-            #expect(recorder.images.first === image)
-            #expect(recorder.failures == 0)
-        }
-
-        @Test("reports a failure when the timeout comes first, and drops the late image")
-        func timeoutBeforeImage() {
-            let recorder = Recorder()
-            recorder.capture(recorder.snapshotter(), WKWebView())
-            recorder.scheduled[0]()
-            recorder.completions[0](makeImage())
-            #expect(recorder.images.isEmpty)
-            #expect(recorder.failures == 1)
-        }
-
-        @Test("reports a failure when WebKit returns no image")
-        func missingImage() {
-            let recorder = Recorder()
-            recorder.capture(recorder.snapshotter(), WKWebView())
-            recorder.completions[0](nil)
-            recorder.scheduled[0]()
-            #expect(recorder.images.isEmpty)
-            #expect(recorder.failures == 1)
-        }
-
-        @Test("reports a failure when WebKit returns an empty image")
-        func emptyImage() {
-            let recorder = Recorder()
-            recorder.capture(recorder.snapshotter(), WKWebView())
-            recorder.completions[0](UIImage())
-            recorder.scheduled[0]()
-            #expect(recorder.images.isEmpty)
-            #expect(recorder.failures == 1)
-        }
-
-        @Test("keeps each capture's outcome to itself")
-        func separateCaptures() {
-            let recorder = Recorder()
+        @Test("hands over the image given during the call")
+        func imageDuringCall() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let image = makeSnapshotImage()
+            recorder.reply = .during(image)
             let snapshotter = recorder.snapshotter()
-            recorder.capture(snapshotter, WKWebView())
-            recorder.capture(snapshotter, WKWebView())
-            recorder.scheduled[0]()
-            recorder.completions[1](makeImage())
-            recorder.completions[0](makeImage())
-            recorder.scheduled[1]()
-            #expect(recorder.images.count == 1)
-            #expect(recorder.failures == 1)
+            let target = NSObject()
+            #expect(snapshotter.image(of: target) === image)
+            #expect(recorder.requests == [ObjectIdentifier(target)])
+            #expect(!snapshotter.isAwaitingAnswer)
         }
 
-        @Test("uses the shared timeout by default")
-        func defaultTimeout() {
-            var delays: [TimeInterval] = []
-            let snapshotter = PostHogWebViewSnapshotter(
-                snapshot: { _, _ in },
-                schedule: { delay, _ in delays.append(delay) }
-            )
-            snapshotter.capture(WKWebView(), onImage: { _ in }, onFailure: {})
-            #expect(delays == [PostHogWebViewSnapshot.timeout])
+        @Test("asks again on every capture answered during the call")
+        func asksOnEveryAnsweredCapture() {
+            let recorder = SnapshotRecorder<NSObject>()
+            recorder.reply = .during(makeSnapshotImage())
+            let snapshotter = recorder.snapshotter()
+            let target = NSObject()
+            _ = snapshotter.image(of: target)
+            _ = snapshotter.image(of: target)
+            _ = snapshotter.image(of: target)
+            #expect(recorder.requests.count == 3)
+            #expect(!snapshotter.isAwaitingAnswer)
+        }
+
+        @Test("hands over nothing when no image is given during the call, and waits for nothing")
+        func noImageDuringCall() {
+            let recorder = SnapshotRecorder<NSObject>()
+            recorder.reply = .during(nil)
+            let snapshotter = recorder.snapshotter()
+            let target = NSObject()
+            #expect(snapshotter.image(of: target) == nil)
+            #expect(!snapshotter.isAwaitingAnswer)
+            #expect(recorder.requests == [ObjectIdentifier(target)])
+        }
+
+        @Test("hands over nothing when an empty image is given during the call, and waits for nothing")
+        func emptyImageDuringCall() {
+            let recorder = SnapshotRecorder<NSObject>()
+            recorder.reply = .during(UIImage())
+            let snapshotter = recorder.snapshotter()
+            let target = NSObject()
+            #expect(snapshotter.image(of: target) == nil)
+            #expect(!snapshotter.isAwaitingAnswer)
+            #expect(recorder.requests == [ObjectIdentifier(target)])
+        }
+
+        @Test("hands over nothing when nothing answers during the call, and awaits the answer")
+        func noAnswerDuringCall() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let snapshotter = recorder.snapshotter()
+            let target = NSObject()
+            #expect(snapshotter.image(of: target) == nil)
+            #expect(snapshotter.isAwaitingAnswer)
+            #expect(recorder.requests == [ObjectIdentifier(target)])
+        }
+
+        @Test("asks nothing more while an answer is awaited")
+        func noSecondRequestWhileAwaiting() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let snapshotter = recorder.snapshotter()
+            let target = NSObject()
+            _ = snapshotter.image(of: target)
+            recorder.reply = .during(makeSnapshotImage())
+            #expect(snapshotter.image(of: target) == nil)
+            #expect(snapshotter.image(of: NSObject()) == nil)
+            #expect(recorder.requests.count == 1)
+            #expect(recorder.completions.count == 1)
+        }
+
+        @Test("asks again once the late answer arrives, and drops the late image")
+        func asksAgainAfterLateAnswer() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let snapshotter = recorder.snapshotter()
+            let target = NSObject()
+            _ = snapshotter.image(of: target)
+            recorder.completions[0](makeSnapshotImage(.blue))
+            #expect(!snapshotter.isAwaitingAnswer)
+            let image = makeSnapshotImage()
+            recorder.reply = .during(image)
+            #expect(snapshotter.image(of: target) === image)
+            #expect(recorder.requests.count == 2)
+        }
+
+        @Test("asks again once a late answer without an image arrives")
+        func asksAgainAfterLateFailure() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let snapshotter = recorder.snapshotter()
+            let target = NSObject()
+            _ = snapshotter.image(of: target)
+            recorder.completions[0](nil)
+            #expect(!snapshotter.isAwaitingAnswer)
+            #expect(snapshotter.image(of: target) == nil)
+            #expect(recorder.requests.count == 2)
+        }
+
+        @Test("asks again once the web view it awaits is gone")
+        func asksAgainOnceWebViewIsGone() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let snapshotter = recorder.snapshotter()
+            weak var released: NSObject?
+            autoreleasepool {
+                let target = NSObject()
+                released = target
+                _ = snapshotter.image(of: target)
+            }
+            #expect(released == nil)
+            #expect(!snapshotter.isAwaitingAnswer)
+            let image = makeSnapshotImage()
+            recorder.reply = .during(image)
+            #expect(snapshotter.image(of: NSObject()) === image)
+            #expect(recorder.requests.count == 2)
+        }
+
+        @Test("keeps awaiting a web view when a gone one answers late")
+        func lateAnswerFromGoneWebView() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let snapshotter = recorder.snapshotter()
+            weak var released: NSObject?
+            autoreleasepool {
+                let target = NSObject()
+                released = target
+                _ = snapshotter.image(of: target)
+            }
+            #expect(released == nil)
+            let current = NSObject()
+            #expect(snapshotter.image(of: current) == nil)
+            #expect(snapshotter.isAwaitingAnswer)
+            recorder.completions[0](makeSnapshotImage())
+            #expect(snapshotter.isAwaitingAnswer)
+            recorder.completions[1](nil)
+            #expect(!snapshotter.isAwaitingAnswer)
+        }
+
+        @Test("ignores a second late answer to the same request")
+        func secondLateAnswer() {
+            let recorder = SnapshotRecorder<NSObject>()
+            let snapshotter = recorder.snapshotter()
+            let first = NSObject()
+            _ = snapshotter.image(of: first)
+            recorder.completions[0](nil)
+            let second = NSObject()
+            _ = snapshotter.image(of: second)
+            #expect(snapshotter.isAwaitingAnswer)
+            recorder.completions[0](nil)
+            #expect(snapshotter.isAwaitingAnswer)
         }
 
         final class RepliedWebView: WKWebView {
@@ -468,16 +529,34 @@
             }
         }
 
-        @Test("asks WebKit for a snapshot taken after the web view's next update, and hands over its image")
+        final class DeferringWebView: WKWebView {
+            var handlers: [@MainActor (UIImage?, Error?) -> Void] = []
+
+            override func takeSnapshot(
+                with _: WKSnapshotConfiguration?,
+                completionHandler: @escaping @MainActor (UIImage?, Error?) -> Void
+            ) {
+                handlers.append(completionHandler)
+            }
+        }
+
+        @Test("asks WebKit for a snapshot of what the web view shows now, without waiting for its next update")
+        func webKitSnapshotConfiguration() {
+            let webView = RepliedWebView()
+            webView.reply = (makeSnapshotImage(), nil)
+            PostHogWebViewSnapshotter<WKWebView>.webKitSnapshot(webView) { _ in }
+            #expect(webView.configurations.count == 1)
+            #expect(webView.configurations.first??.afterScreenUpdates == false)
+            #expect(webView.configurations.first??.rect.isNull == true)
+        }
+
+        @Test("hands over WebKit's image")
         func webKitSnapshotImage() {
             let webView = RepliedWebView()
-            let image = makeImage()
+            let image = makeSnapshotImage()
             webView.reply = (image, nil)
             var delivered: [UIImage?] = []
-            PostHogWebViewSnapshotter.webKitSnapshot(webView) { delivered.append($0) }
-            #expect(webView.configurations.count == 1)
-            #expect(webView.configurations.first??.afterScreenUpdates == true)
-            #expect(webView.configurations.first??.rect.isNull == true)
+            PostHogWebViewSnapshotter<WKWebView>.webKitSnapshot(webView) { delivered.append($0) }
             #expect(delivered.count == 1)
             #expect(delivered.first.flatMap { $0 } === image)
         }
@@ -487,33 +566,182 @@
             let webView = RepliedWebView()
             webView.reply = (nil, NSError(domain: WKErrorDomain, code: WKError.unknown.rawValue))
             var delivered: [UIImage?] = []
-            PostHogWebViewSnapshotter.webKitSnapshot(webView) { delivered.append($0) }
+            PostHogWebViewSnapshotter<WKWebView>.webKitSnapshot(webView) { delivered.append($0) }
             #expect(delivered.count == 1)
             #expect(delivered.first.flatMap { $0 } == nil)
         }
-    }
 
-    @Suite("Exactly-once flag")
-    struct PostHogOnceTests {
-        @Test("lets only the first caller through")
-        func firstCallerOnly() {
-            let once = PostHogOnce()
-            #expect(once.claim())
-            #expect(!once.claim())
-            #expect(!once.claim())
+        @Test("takes the image of a web view that answers during the call by default")
+        func defaultSnapshotAnsweredDuringCall() {
+            let webView = RepliedWebView()
+            let image = makeSnapshotImage()
+            webView.reply = (image, nil)
+            let snapshotter = PostHogWebViewSnapshotter<WKWebView>()
+            #expect(snapshotter.image(of: webView) === image)
+            #expect(webView.configurations.count == 1)
+            #expect(!snapshotter.isAwaitingAnswer)
         }
 
-        @Test("lets exactly one of many concurrent callers through")
-        func concurrentCallers() {
-            let once = PostHogOnce()
-            let lock = NSLock()
-            var claims = 0
-            DispatchQueue.concurrentPerform(iterations: 64) { _ in
-                if once.claim() {
-                    lock.withLock { claims += 1 }
-                }
+        @Test("awaits a web view that answers later by default, and asks again once it has")
+        func defaultSnapshotAnsweredLater() {
+            let webView = DeferringWebView()
+            let snapshotter = PostHogWebViewSnapshotter<WKWebView>()
+            #expect(snapshotter.image(of: webView) == nil)
+            #expect(snapshotter.image(of: webView) == nil)
+            #expect(webView.handlers.count == 1)
+            #expect(snapshotter.isAwaitingAnswer)
+            webView.handlers[0](makeSnapshotImage(), nil)
+            #expect(!snapshotter.isAwaitingAnswer)
+            #expect(snapshotter.image(of: webView) == nil)
+            #expect(webView.handlers.count == 2)
+        }
+    }
+
+    @Suite("Web view screenshot")
+    @MainActor
+    struct PostHogWebViewScreenshotTests {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+
+        final class Drawer {
+            var windows: [UIWindow] = []
+            var image: UIImage? = makeSnapshotImage(.green)
+
+            func draw(_ window: UIWindow) -> UIImage? {
+                windows.append(window)
+                return image
             }
-            #expect(claims == 1)
+        }
+
+        func makeWindow(showingOnlyAWebView: Bool = true) -> UIWindow {
+            let window = UIWindow(frame: bounds)
+            window.isHidden = false
+            let webView = WKWebView(frame: bounds)
+            webView.isOpaque = true
+            window.addSubview(webView)
+            if !showingOnlyAWebView {
+                window.addSubview(UIView(frame: CGRect(x: 10, y: 10, width: 40, height: 40)))
+            }
+            return window
+        }
+
+        func screenshot(
+            _ window: UIWindow,
+            webViewSnapshots: Bool = true,
+            onMainThread: Bool = true,
+            snapshotter: PostHogWebViewSnapshotter<WKWebView>,
+            drawer: Drawer
+        ) -> UIImage? {
+            PostHogWebViewSnapshot.screenshot(
+                of: window,
+                webViewSnapshots: webViewSnapshots,
+                onMainThread: onMainThread,
+                snapshotter: snapshotter,
+                draw: drawer.draw
+            )
+        }
+
+        @Test("takes WebKit's image of a web view that is all the window shows, without drawing the window")
+        func webKitImage() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            let image = makeSnapshotImage()
+            recorder.reply = .during(image)
+            let drawer = Drawer()
+            let window = makeWindow()
+            #expect(screenshot(window, snapshotter: recorder.snapshotter(), drawer: drawer) === image)
+            #expect(recorder.requests.count == 1)
+            #expect(drawer.windows.isEmpty)
+        }
+
+        @Test("draws the window when WebKit does not answer during the capture")
+        func drawsWithoutAnswer() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            let drawer = Drawer()
+            let window = makeWindow()
+            #expect(screenshot(window, snapshotter: recorder.snapshotter(), drawer: drawer) === drawer.image)
+            #expect(drawer.windows == [window])
+        }
+
+        @Test("draws every capture without asking WebKit while its answer is awaited, and asks again once it has answered")
+        func drawsWhileAwaiting() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            let snapshotter = recorder.snapshotter()
+            let drawer = Drawer()
+            let window = makeWindow()
+            _ = screenshot(window, snapshotter: snapshotter, drawer: drawer)
+            recorder.reply = .during(makeSnapshotImage())
+            _ = screenshot(window, snapshotter: snapshotter, drawer: drawer)
+            _ = screenshot(window, snapshotter: snapshotter, drawer: drawer)
+            #expect(recorder.requests.count == 1)
+            #expect(drawer.windows.count == 3)
+            recorder.completions[0](nil)
+            let image = makeSnapshotImage(.blue)
+            recorder.reply = .during(image)
+            #expect(screenshot(window, snapshotter: snapshotter, drawer: drawer) === image)
+            #expect(recorder.requests.count == 2)
+            #expect(drawer.windows.count == 3)
+        }
+
+        @Test("draws the window when WebKit gives no image")
+        func drawsWithoutImage() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            recorder.reply = .during(nil)
+            let drawer = Drawer()
+            let window = makeWindow()
+            #expect(screenshot(window, snapshotter: recorder.snapshotter(), drawer: drawer) === drawer.image)
+            #expect(drawer.windows == [window])
+        }
+
+        @Test("draws the window when WebKit gives an empty image")
+        func drawsWithEmptyImage() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            recorder.reply = .during(UIImage())
+            let drawer = Drawer()
+            let window = makeWindow()
+            #expect(screenshot(window, snapshotter: recorder.snapshotter(), drawer: drawer) === drawer.image)
+            #expect(drawer.windows == [window])
+        }
+
+        @Test("draws the window without asking WebKit when web view snapshots are off")
+        func drawsWhenOff() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            recorder.reply = .during(makeSnapshotImage())
+            let drawer = Drawer()
+            let window = makeWindow()
+            #expect(screenshot(window, webViewSnapshots: false, snapshotter: recorder.snapshotter(), drawer: drawer) === drawer.image)
+            #expect(recorder.requests.isEmpty)
+            #expect(drawer.windows == [window])
+        }
+
+        @Test("draws the window without asking WebKit when capturing off the main thread")
+        func drawsOffMainThread() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            recorder.reply = .during(makeSnapshotImage())
+            let drawer = Drawer()
+            let window = makeWindow()
+            #expect(screenshot(window, onMainThread: false, snapshotter: recorder.snapshotter(), drawer: drawer) === drawer.image)
+            #expect(recorder.requests.isEmpty)
+            #expect(drawer.windows == [window])
+        }
+
+        @Test("draws the window without asking WebKit when it shows more than a web view")
+        func drawsWithOverlay() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            recorder.reply = .during(makeSnapshotImage())
+            let drawer = Drawer()
+            let window = makeWindow(showingOnlyAWebView: false)
+            #expect(screenshot(window, snapshotter: recorder.snapshotter(), drawer: drawer) === drawer.image)
+            #expect(recorder.requests.isEmpty)
+            #expect(drawer.windows == [window])
+        }
+
+        @Test("gives nothing when WebKit gives nothing and the window cannot be drawn")
+        func nothingAtAll() {
+            let recorder = SnapshotRecorder<WKWebView>()
+            recorder.reply = .during(nil)
+            let drawer = Drawer()
+            drawer.image = nil
+            #expect(screenshot(makeWindow(), snapshotter: recorder.snapshotter(), drawer: drawer) == nil)
+            #expect(drawer.windows.count == 1)
         }
     }
 
@@ -549,21 +777,11 @@
             }
         }
 
-        final class FakeWebKit {
-            var requested: [WKWebView] = []
-            var completions: [(UIImage?) -> Void] = []
-            var timeouts: [() -> Void] = []
+        final class ReleasedWebView: WKWebView {
+            var onRelease: (() -> Void)?
 
-            var snapshotter: PostHogWebViewSnapshotter {
-                PostHogWebViewSnapshotter(
-                    snapshot: { webView, completion in
-                        self.requested.append(webView)
-                        self.completions.append(completion)
-                    },
-                    schedule: { _, work in
-                        self.timeouts.append(work)
-                    }
-                )
+            deinit {
+                onRelease?()
             }
         }
 
@@ -571,7 +789,7 @@
             let sdk: PostHogSDK
             let integration: PostHogReplayIntegration
             let snapshots: Snapshots
-            let webKit: FakeWebKit
+            let webKit: SnapshotRecorder<WKWebView>
             let window: UIWindow
             let webView: WKWebView
         }
@@ -603,8 +821,8 @@
             let sdk = PostHogSDK.with(config)
             let integration = try #require(sdk.getReplayIntegration())
             #expect(sdk.isSessionReplayActive())
-            let webKit = FakeWebKit()
-            integration.webViewSnapshotter = webKit.snapshotter
+            let webKit = SnapshotRecorder<WKWebView>()
+            integration.webViewSnapshotter = webKit.snapshotter()
 
             let root = UIViewController()
             let window = UIWindow(frame: bounds)
@@ -651,109 +869,177 @@
             return Array(rgba.prefix(3))
         }
 
-        @Test("asks WebKit for a window that shows only a web view, and uploads the image it returns")
+        func isRed(_ center: [UInt8]) -> Bool {
+            center[0] > 200 && center[1] < 50 && center[2] < 50
+        }
+
+        func uploadsNoRed(_ harness: Harness) throws -> Bool {
+            try harness.snapshots.screenshots.allSatisfy { try !isRed(uploadedCenter($0)) }
+        }
+
+        func capture(_ harness: Harness, episodeFirstFrame: Bool = false) -> Bool {
+            harness.integration.captureBridgeSnapshot(episodeFirstFrame: episodeFirstFrame, window: harness.window)
+        }
+
+        @Test("asks WebKit for a window that shows only a web view, and uploads the image it gives during the capture")
         func uploadsWebKitSnapshot() async throws {
             let harness = try makeHarness()
             defer { close(harness) }
+            harness.webKit.reply = .during(redImage())
 
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            #expect(harness.webKit.requested.count == 1)
-            #expect(harness.webKit.requested.first === harness.webView)
-
-            harness.webKit.completions[0](redImage())
+            #expect(capture(harness))
+            #expect(harness.webKit.requests == [ObjectIdentifier(harness.webView)])
             await drainReplayQueue()
 
             let screenshot = try #require(harness.snapshots.screenshots.first)
-            let center = try uploadedCenter(screenshot)
-            #expect(center[0] > 200 && center[1] < 50 && center[2] < 50)
+            #expect(try isRed(uploadedCenter(screenshot)))
         }
 
         @Test("masks the snapshot as it would mask a drawn window")
         func masksWebKitSnapshot() async throws {
             let harness = try makeHarness(maskAllTextInputs: true)
             defer { close(harness) }
+            harness.webKit.reply = .during(redImage())
 
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            harness.webKit.completions[0](redImage())
+            #expect(capture(harness))
             await drainReplayQueue()
 
             let screenshot = try #require(harness.snapshots.screenshots.first)
             #expect(try uploadedCenter(screenshot).allSatisfy { $0 < 50 })
         }
 
-        @Test("skips captures while WebKit is still taking a snapshot, and resumes once the image arrives")
-        func holdsTheGateUntilTheImageArrives() async throws {
+        @Test("draws the window when WebKit gives no image during the capture, and drops the image that arrives later")
+        func drawsWithoutAnswer() async throws {
             let harness = try makeHarness()
             defer { close(harness) }
+            let drawable = harness.window.toImage(preferFidelityRenderer: true) != nil
 
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            #expect(!harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            #expect(harness.webKit.requested.count == 1)
-
+            #expect(capture(harness) == drawable)
+            #expect(harness.webKit.requests.count == 1)
             harness.webKit.completions[0](redImage())
             await drainReplayQueue()
 
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            #expect(harness.webKit.requested.count == 2)
+            #expect(harness.snapshots.screenshots.count == (drawable ? 1 : 0))
+            #expect(try uploadsNoRed(harness))
         }
 
-        @Test("resumes capturing after a snapshot times out, and drops the image that arrives late")
-        func timeoutReleasesTheGate() async throws {
+        @Test("draws the window when WebKit gives an empty image during the capture")
+        func drawsWithEmptyImage() async throws {
             let harness = try makeHarness()
             defer { close(harness) }
+            harness.webKit.reply = .during(UIImage())
+            let drawable = harness.window.toImage(preferFidelityRenderer: true) != nil
 
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            harness.webKit.timeouts[0]()
-            harness.webKit.completions[0](redImage())
+            #expect(capture(harness) == drawable)
+            #expect(harness.webKit.requests.count == 1)
             await drainReplayQueue()
 
-            #expect(harness.snapshots.screenshots.isEmpty)
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            #expect(harness.webKit.requested.count == 2)
+            #expect(harness.snapshots.screenshots.count == (drawable ? 1 : 0))
+            #expect(!harness.integration.webViewSnapshotter.isAwaitingAnswer)
         }
 
-        @Test("drops an image that arrives after recording stopped, and releases the gate")
-        func imageAfterStop() async throws {
+        @Test("draws every capture without asking WebKit again while its answer is outstanding, and asks again once it has answered")
+        func noSecondRequestWhileOutstanding() async throws {
             let harness = try makeHarness()
             defer { close(harness) }
 
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
+            _ = capture(harness)
+            harness.webKit.reply = .during(redImage())
+            _ = capture(harness)
+            _ = capture(harness)
+            #expect(harness.webKit.requests.count == 1)
+            #expect(harness.integration.webViewSnapshotter.isAwaitingAnswer)
+            await drainReplayQueue()
+            #expect(try uploadsNoRed(harness))
+
+            harness.webKit.completions[0](nil)
+            #expect(!harness.integration.webViewSnapshotter.isAwaitingAnswer)
+            #expect(capture(harness))
+            #expect(harness.webKit.requests.count == 2)
+            await drainReplayQueue()
+
+            let screenshot = try #require(harness.snapshots.screenshots.last)
+            #expect(try isRed(uploadedCenter(screenshot)))
+        }
+
+        @Test("asks WebKit again once the web view whose answer it awaited is gone")
+        func asksAgainOnceWebViewIsGone() async throws {
+            let harness = try makeHarness()
+            defer { close(harness) }
+            let root = try #require(harness.window.rootViewController?.view)
+            let released = AsyncLatch()
+
+            weak var gone: WKWebView?
+            autoreleasepool {
+                let temporary = ReleasedWebView(frame: bounds)
+                temporary.isOpaque = true
+                temporary.onRelease = released.signal
+                root.addSubview(temporary)
+                gone = temporary
+                _ = capture(harness)
+                temporary.removeFromSuperview()
+            }
+            #expect(harness.webKit.requests.count == 1)
+            await released.wait()
+            try #require(gone == nil)
+            #expect(!harness.integration.webViewSnapshotter.isAwaitingAnswer)
+
+            harness.webKit.reply = .during(redImage())
+            #expect(capture(harness))
+            #expect(harness.webKit.requests.count == 2)
+            #expect(harness.webKit.requests.last == ObjectIdentifier(harness.webView))
+            await drainReplayQueue()
+
+            let screenshot = try #require(harness.snapshots.screenshots.last)
+            #expect(try isRed(uploadedCenter(screenshot)))
+        }
+
+        @Test("asks WebKit nothing once recording has stopped")
+        func stoppedRecording() throws {
+            let harness = try makeHarness()
+            defer { close(harness) }
+            harness.webKit.reply = .during(redImage())
             harness.sdk.stopSessionRecording()
-            harness.webKit.completions[0](redImage())
-            await drainReplayQueue()
-            #expect(harness.snapshots.screenshots.isEmpty)
 
-            harness.sdk.startSessionRecording()
-            #expect(harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window))
-            #expect(harness.webKit.requested.count == 2)
+            #expect(!capture(harness))
+            #expect(harness.webKit.requests.isEmpty)
         }
 
         @Test("draws the window as before when web view snapshots are off")
-        func optionOff() throws {
+        func optionOff() async throws {
             let harness = try makeHarness(webViewSnapshots: false)
             defer { close(harness) }
+            harness.webKit.reply = .during(redImage())
 
-            _ = harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window)
-            #expect(harness.webKit.requested.isEmpty)
+            _ = capture(harness)
+            #expect(harness.webKit.requests.isEmpty)
+            await drainReplayQueue()
+            #expect(try uploadsNoRed(harness))
         }
 
         @Test("draws the window as before when a native view lies over the web view")
-        func nativeOverlay() throws {
+        func nativeOverlay() async throws {
             let harness = try makeHarness()
             defer { close(harness) }
+            harness.webKit.reply = .during(redImage())
             harness.window.rootViewController?.view.addSubview(UILabel(frame: CGRect(x: 20, y: 60, width: 120, height: 40)))
 
-            _ = harness.integration.captureBridgeSnapshot(episodeFirstFrame: false, window: harness.window)
-            #expect(harness.webKit.requested.isEmpty)
+            _ = capture(harness)
+            #expect(harness.webKit.requests.isEmpty)
+            await drainReplayQueue()
+            #expect(try uploadsNoRed(harness))
         }
 
         @Test("draws a bridge episode's first frame as before")
-        func episodeFirstFrame() throws {
+        func episodeFirstFrame() async throws {
             let harness = try makeHarness()
             defer { close(harness) }
+            harness.webKit.reply = .during(redImage())
 
-            _ = harness.integration.captureBridgeSnapshot(episodeFirstFrame: true, window: harness.window)
-            #expect(harness.webKit.requested.isEmpty)
+            _ = capture(harness, episodeFirstFrame: true)
+            #expect(harness.webKit.requests.isEmpty)
+            await drainReplayQueue()
+            #expect(try uploadsNoRed(harness))
         }
     }
 #endif

@@ -8,7 +8,20 @@
     }
 
     enum PostHogWebViewSnapshot {
-        static let timeout: TimeInterval = 5
+        static func screenshot(
+            of window: UIWindow,
+            webViewSnapshots: Bool,
+            onMainThread: Bool,
+            snapshotter: PostHogWebViewSnapshotter<WKWebView>,
+            draw: (UIWindow) -> UIImage?
+        ) -> UIImage? {
+            if case let .webView(webView) = source(for: window, webViewSnapshots: webViewSnapshots, onMainThread: onMainThread),
+               let image = snapshotter.image(of: webView)
+            {
+                return image
+            }
+            return draw(window)
+        }
 
         static func source(
             for window: UIWindow,
@@ -79,72 +92,64 @@
         }
     }
 
-    final class PostHogWebViewSnapshotter {
-        typealias Snapshot = (WKWebView, @escaping (UIImage?) -> Void) -> Void
-        typealias Schedule = (TimeInterval, @escaping () -> Void) -> Void
+    final class PostHogWebViewSnapshotter<WebView: AnyObject> {
+        typealias Snapshot = (WebView, @escaping (UIImage?) -> Void) -> Void
 
         private let snapshot: Snapshot
-        private let schedule: Schedule
-        private let timeout: TimeInterval
+        private weak var unanswered: WebView?
 
-        init(
-            snapshot: @escaping Snapshot = PostHogWebViewSnapshotter.webKitSnapshot,
-            schedule: @escaping Schedule = PostHogWebViewSnapshotter.mainQueueSchedule,
-            timeout: TimeInterval = PostHogWebViewSnapshot.timeout
-        ) {
+        init(snapshot: @escaping Snapshot) {
             self.snapshot = snapshot
-            self.schedule = schedule
-            self.timeout = timeout
         }
 
-        func capture(_ webView: WKWebView, onImage: @escaping (UIImage) -> Void, onFailure: @escaping () -> Void) {
-            let outcome = PostHogOnce()
-            schedule(timeout) {
-                guard outcome.claim() else {
-                    return
-                }
-                hedgeLog("[Session Replay] The web view snapshot did not arrive in time. Skipping this capture...")
-                onFailure()
+        var isAwaitingAnswer: Bool {
+            unanswered != nil
+        }
+
+        func image(of webView: WebView) -> UIImage? {
+            guard unanswered == nil else {
+                return nil
             }
-            snapshot(webView) { image in
-                guard outcome.claim() else {
+            var asking = true
+            var answered = false
+            var answer: UIImage?
+            snapshot(webView) { [weak self, weak webView] image in
+                if asking {
+                    answered = true
+                    answer = image
                     return
                 }
-                guard let image, image.size.hasSize() else {
-                    onFailure()
+                guard let self, self.unanswered === webView else {
                     return
                 }
-                onImage(image)
+                self.unanswered = nil
             }
+            asking = false
+            guard answered else {
+                hedgeLog("[Session Replay] WebKit did not snapshot the web view at once. Drawing the window instead...")
+                unanswered = webView
+                return nil
+            }
+            guard let answer, answer.size.hasSize() else {
+                return nil
+            }
+            return answer
+        }
+    }
+
+    extension PostHogWebViewSnapshotter where WebView == WKWebView {
+        convenience init() {
+            self.init(snapshot: PostHogWebViewSnapshotter.webKitSnapshot)
         }
 
         static func webKitSnapshot(_ webView: WKWebView, _ completion: @escaping (UIImage?) -> Void) {
             let configuration = WKSnapshotConfiguration()
-            configuration.afterScreenUpdates = true
+            configuration.afterScreenUpdates = false
             webView.takeSnapshot(with: configuration) { image, error in
                 if let error {
                     hedgeLog("[Session Replay] WebKit could not snapshot the web view: \(error).")
                 }
                 completion(image)
-            }
-        }
-
-        static func mainQueueSchedule(_ delay: TimeInterval, _ work: @escaping () -> Void) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-        }
-    }
-
-    final class PostHogOnce {
-        private let lock = NSLock()
-        private var claimed = false
-
-        func claim() -> Bool {
-            lock.withLock {
-                if claimed {
-                    return false
-                }
-                claimed = true
-                return true
             }
         }
     }
